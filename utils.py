@@ -379,6 +379,8 @@ def fetch_data(start: str, end: str) -> pd.DataFrame:
         })
 
     df = pd.DataFrame(rows)
+    # pre_approved = equivalente a enviada al banco (usado por Banco Internacional)
+    df["status"] = df["status"].replace("pre_approved", "sent_to_bank")
     df["createdAt"] = pd.to_datetime(df["createdAt"], utc=True).dt.tz_convert("America/Santiago")
     df["updatedAt"] = pd.to_datetime(df["updatedAt"], utc=True).dt.tz_convert("America/Santiago")
     df["date"]    = df["createdAt"].dt.date
