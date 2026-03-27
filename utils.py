@@ -4,6 +4,7 @@ import base64
 import math
 import os
 from datetime import date, timedelta, datetime
+import pytz
 from pathlib import Path
 
 import pandas as pd
@@ -629,7 +630,7 @@ def render_dashboard(bank_filter: str = None):
         df_raw  = fetch_data(str(start_date), str(end_date))
         df_prev = fetch_data(prev_start, prev_end)
 
-    now_cl = datetime.now().strftime("%d/%m/%Y %H:%M")
+    now_cl = datetime.now(pytz.timezone("America/Santiago")).strftime("%d/%m/%Y %H:%M")
     st.markdown(f'<p class="last-updated">Actualizado: {now_cl}</p>', unsafe_allow_html=True)
 
     if df_raw.empty:
