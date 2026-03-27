@@ -573,6 +573,8 @@ def render_dashboard(bank_filter: str = None):
         st.markdown("<div style='height:0.6rem'></div>", unsafe_allow_html=True)
         comparar          = False  # desactivado
         alerta_threshold  = 999  # desactivado
+        st.markdown("<div style='height:0.4rem'></div>", unsafe_allow_html=True)
+        rut_search = st.text_input("🔍 Buscar RUT", placeholder="ej: 12.345.678-9", key=f"rut_search_{bank_filter}")
 
     # ── Header ──
     if bank_filter == "BCI":
@@ -960,21 +962,20 @@ def render_dashboard(bank_filter: str = None):
 
     # ── 6. Detalle de registros ──
     _section_header("Detalle de registros", "🔍")
-    f1, f2, f3 = st.columns(3)
+    f1, f2 = st.columns(2)
     with f1:
         banks = ["Todos"] + sorted(df_raw["bank"].dropna().unique().tolist())
         sel_bank = st.selectbox("Banco", banks, key=f"fb_{bank_filter}")
     with f2:
         stats = ["Todos"] + sorted(df_raw["status"].dropna().unique().tolist())
         sel_status = st.selectbox("Status", stats, key=f"fs_{bank_filter}")
-    with f3:
-        ruts = ["Todos"] + sorted(df_raw["rut"].dropna().unique().tolist())
-        sel_rut = st.selectbox("RUT", ruts, key=f"fr_{bank_filter}")
 
     df_f = df_raw.copy()
     if sel_bank   != "Todos": df_f = df_f[df_f["bank"]   == sel_bank]
     if sel_status != "Todos": df_f = df_f[df_f["status"] == sel_status]
-    if sel_rut    != "Todos": df_f = df_f[df_f["rut"]    == sel_rut]
+    if rut_search:
+        term = rut_search.strip().lower()
+        df_f = df_f[df_f["rut"].astype(str).str.lower().str.contains(term, na=False)]
 
     df_display = df_f[["id", "bukLeadId", "bank", "status", "rut", "source", "createdAt", "updatedAt"]].sort_values("createdAt", ascending=False)
 
