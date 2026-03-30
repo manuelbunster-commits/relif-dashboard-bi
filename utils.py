@@ -818,10 +818,15 @@ def render_dashboard(bank_filter: str = None):
     fig_combo.add_trace(go.Bar(x=by_day["date"], y=by_day["Count"], name="Por día", marker_color="#3b82f6", marker_line_width=0))
     fig_combo.add_trace(go.Scatter(x=by_day["date"], y=by_day["Tendencia"], name="Tendencia (3d)", line=dict(color="#8b5cf6", width=2.5, dash="dot")))
     fig_combo.update_layout(
-        margin=dict(t=10, b=10), height=280, xaxis_title="", yaxis_title="",
+        margin=dict(t=10, b=40, r=20), height=300, xaxis_title="", yaxis_title="",
         plot_bgcolor="white", paper_bgcolor="rgba(0,0,0,0)",
         yaxis=dict(gridcolor="#f1f5f9", zeroline=False),
-        xaxis=dict(showgrid=False),
+        xaxis=dict(
+            showgrid=False,
+            range=[by_day["date"].iloc[0] - pd.Timedelta(days=0.5),
+                   by_day["date"].iloc[-1] + pd.Timedelta(days=1)],
+            rangeslider=dict(visible=True, thickness=0.06, bgcolor="#f1f5f9"),
+        ),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, font=dict(size=11)),
         font=dict(family="Inter"),
     )
