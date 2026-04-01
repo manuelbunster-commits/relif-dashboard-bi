@@ -495,7 +495,7 @@ def _style_status(df: pd.DataFrame):
     return df.style.apply(row_bg, axis=1)
 
 
-def render_dashboard(bank_filter: str = None):
+def render_dashboard(bank_filter: str = None, chart_scroll: bool = False):
     st.markdown(CARD_CSS, unsafe_allow_html=True)
     st.markdown(SCROLL_ANIM, unsafe_allow_html=True)
 
