@@ -345,16 +345,30 @@ def get_token() -> str:
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_data(start: str, end: str) -> pd.DataFrame:
+def fetch_data(start: str, end: str, dedup_clients: bool = False) -> pd.DataFrame:
     token = get_token()
-    query = f"""
-        SELECT "BankOfferRequests".*, "Clients"."id" as "clientId", "Clients"."rut", "Clients"."source"
-        FROM "BankOfferRequests"
-        LEFT JOIN "Clients" ON "BankOfferRequests"."rut" = "Clients"."rut"
-          AND "Clients"."businessUnitId" = 73
-        WHERE "BankOfferRequests"."createdAt" >= '{start}'
-          AND "BankOfferRequests"."createdAt" <  '{end}'
-    """
+    if dedup_clients:
+        query = f"""
+            SELECT "BankOfferRequests".*, c."id" as "clientId", c."rut", c."source"
+            FROM "BankOfferRequests"
+            LEFT JOIN (
+                SELECT DISTINCT ON ("rut") "id", "rut", "source"
+                FROM "Clients"
+                WHERE "businessUnitId" = 73
+                ORDER BY "rut", "createdAt" DESC
+            ) c ON "BankOfferRequests"."rut" = c."rut"
+            WHERE "BankOfferRequests"."createdAt" >= '{start}'
+              AND "BankOfferRequests"."createdAt" <  '{end}'
+        """
+    else:
+        query = f"""
+            SELECT "BankOfferRequests".*, "Clients"."id" as "clientId", "Clients"."rut", "Clients"."source"
+            FROM "BankOfferRequests"
+            LEFT JOIN "Clients" ON "BankOfferRequests"."rut" = "Clients"."rut"
+              AND "Clients"."businessUnitId" = 73
+            WHERE "BankOfferRequests"."createdAt" >= '{start}'
+              AND "BankOfferRequests"."createdAt" <  '{end}'
+        """
     resp = requests.post(
         RELIF_EXECUTE_URL,
         headers={"Authorization": f"Bearer {token}"},
@@ -495,7 +509,43 @@ def _style_status(df: pd.DataFrame):
     return df.style.apply(row_bg, axis=1)
 
 
-def render_dashboard(bank_filter: str = None, chart_scroll: bool = False):
+RANGOS_SUELDO = [
+    (0,          600_000,   "< $600k",      "#f1f5f9", "#475569"),
+    (600_000,  1_600_000,   "$600k – $1.6M","#dbeafe", "#1d4ed8"),
+    (1_600_000,2_500_000,   "$1.6M – $2.5M","#dcfce7", "#15803d"),
+    (2_500_000,4_000_000,   "$2.5M – $4M",  "#fef9c3", "#92400e"),
+    (4_000_000,8_000_000,   "$4M – $8M",    "#fed7aa", "#c2410c"),
+    (8_000_000,999_999_999, "Más de $8M",   "#fce7f3", "#be185d"),
+]
+
+def _rango_badge(monto):
+    if pd.isna(monto):
+        return '<span class="status-badge" style="background:#f1f5f9;color:#94a3b8">Sin datos</span>'
+    for lo, hi, label, bg, color in RANGOS_SUELDO:
+        if lo <= monto < hi:
+            return f'<span class="status-badge" style="background:{bg};color:{color}">{label}</span>'
+    return "—"
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _fetch_sueldos_por_rut():
+    token = os.environ.get("RELIF_JWT_TOKEN", "")
+    query = """
+        SELECT c.rut, ROUND(AVG((d.data->>'incomeGross')::numeric)) AS avg_gross
+        FROM "Documents" d
+        JOIN "Clients" c ON d."clientId" = c.id
+        WHERE d.type = 'buk_settlement'
+          AND (d.data->>'incomeGross') IS NOT NULL
+        GROUP BY c.rut
+    """
+    resp = requests.post(RELIF_EXECUTE_URL,
+        headers={"Authorization": f"Bearer {token}"},
+        json={"userQuery": query.strip()}, timeout=60)
+    resp.raise_for_status()
+    results = resp.json().get("results", [])
+    return {r["rut"]: float(r["avg_gross"]) for r in results if r.get("avg_gross")}
+
+
+def render_dashboard(bank_filter: str = None, show_salary_range: bool = False, chart_scroll: bool = False, dedup_clients: bool = False, chart_days: int = None):
     st.markdown(CARD_CSS, unsafe_allow_html=True)
     st.markdown(SCROLL_ANIM, unsafe_allow_html=True)
 
@@ -535,6 +585,7 @@ def render_dashboard(bank_filter: str = None, chart_scroll: bool = False):
             ("🏦",     "Consolidado",        "Acumulado.py",                   None,    None,   "/"),
             (_bci_b64, "BCI",                "pages/1_BCI.py",                 None,    "18px", "/BCI"),
             (_bi_b64,  "Banco Internacional","pages/2_Banco_Internacional.py", None,    "13px", "/Banco_Internacional"),
+            ("📣",     "Campañas (prueba)",  "pages/99_Prueba.py",             None,    None,   "/Prueba"),
         ]
         nav_pages = [(l, lbl, p, f, h, url) for l, lbl, p, f, h, url in _all_nav if (_base / p).exists()]
         if len(nav_pages) > 1:
@@ -627,8 +678,8 @@ def render_dashboard(bank_filter: str = None, chart_scroll: bool = False):
         prev_end   = str(start_date)
 
     with st.spinner("Cargando datos..."):
-        df_raw  = fetch_data(str(start_date), str(end_date))
-        df_prev = fetch_data(prev_start, prev_end)
+        df_raw  = fetch_data(str(start_date), str(end_date), dedup_clients=dedup_clients)
+        df_prev = fetch_data(prev_start, prev_end, dedup_clients=dedup_clients)
 
     now_cl = datetime.now(pytz.timezone("America/Santiago")).strftime("%d/%m/%Y %H:%M")
     st.markdown(f'<p class="last-updated">Actualizado: {now_cl}</p>', unsafe_allow_html=True)
@@ -812,26 +863,34 @@ def render_dashboard(bank_filter: str = None, chart_scroll: bool = False):
 
     st.markdown('<p style="font-size:0.75rem;font-weight:600;color:#64748b;margin:0.5rem 0 0.3rem">Requests por día + tendencia</p>', unsafe_allow_html=True)
     by_day = df_g.groupby("date").size().reset_index(name="Count")
-    by_day["Tendencia"] = by_day["Count"].rolling(window=3, min_periods=1).mean()
+    if chart_days:
+        by_day = by_day.tail(chart_days).reset_index(drop=True)
+    by_day["Enviados"] = df_g[df_g["status"] == "sent_to_bank"].groupby("date").size().reindex(by_day["date"]).fillna(0).values
+    by_day["Otros"] = by_day["Count"] - by_day["Enviados"]
+    by_day["Tendencia"] = by_day["Enviados"].rolling(window=3, min_periods=1).mean()
 
     fig_combo = go.Figure()
-    fig_combo.add_trace(go.Bar(x=by_day["date"], y=by_day["Count"], name="Por día", marker_color="#3b82f6", marker_line_width=0))
+    fig_combo.add_trace(go.Bar(x=by_day["date"], y=by_day["Enviados"], name="Enviados al banco", marker_color="#22c55e", marker_line_width=0))
+    fig_combo.add_trace(go.Bar(x=by_day["date"], y=by_day["Otros"], name="Otros", marker_color="#3b82f6", marker_line_width=0))
     fig_combo.add_trace(go.Scatter(x=by_day["date"], y=by_day["Tendencia"], name="Tendencia (3d)", line=dict(color="#8b5cf6", width=2.5, dash="dot")))
-    fig_combo.update_layout(
-        margin=dict(t=10, b=40, r=20), height=300, xaxis_title="", yaxis_title="",
-        plot_bgcolor="white", paper_bgcolor="rgba(0,0,0,0)",
-        yaxis=dict(gridcolor="#f1f5f9", zeroline=False),
-        xaxis=dict(
-            showgrid=False,
+    _xaxis = dict(showgrid=False)
+    if chart_scroll:
+        _xaxis.update(dict(
             range=[by_day["date"].iloc[0] - pd.Timedelta(days=0.5),
                    by_day["date"].iloc[-1] + pd.Timedelta(days=1)],
             rangeslider=dict(visible=True, thickness=0.06, bgcolor="#f1f5f9"),
-        ),
+        ))
+    fig_combo.update_layout(
+        barmode="stack",
+        margin=dict(t=10, b=40 if chart_scroll else 10, r=20), height=300 if chart_scroll else 280,
+        xaxis_title="", yaxis_title="",
+        plot_bgcolor="white", paper_bgcolor="rgba(0,0,0,0)",
+        yaxis=dict(gridcolor="#f1f5f9", zeroline=False),
+        xaxis=_xaxis,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, font=dict(size=11)),
         font=dict(family="Inter"),
     )
     st.plotly_chart(fig_combo, use_container_width=True)
-
 
     # ── 4. Resumen ──
     _section_header("Resumen", "📊")
@@ -968,13 +1027,20 @@ def render_dashboard(bank_filter: str = None, chart_scroll: bool = False):
 
     # ── 6. Detalle de registros ──
     _section_header("Detalle de registros", "🔍")
-    f1, f2 = st.columns(2)
-    with f1:
+    _cols = [1, 1, 1] if show_salary_range else [1, 1]
+    filter_cols = st.columns(_cols)
+    with filter_cols[0]:
         banks = ["Todos"] + sorted(df_raw["bank"].dropna().unique().tolist())
         sel_bank = st.selectbox("Banco", banks, key=f"fb_{bank_filter}")
-    with f2:
+    with filter_cols[1]:
         stats = ["Todos"] + sorted(df_raw["status"].dropna().unique().tolist())
         sel_status = st.selectbox("Status", stats, key=f"fs_{bank_filter}")
+    if show_salary_range:
+        with filter_cols[2]:
+            st.markdown("<div style='height:1.9rem'></div>", unsafe_allow_html=True)
+            sort_by_salary = st.checkbox("↓ Ordenar por sueldo", key=f"sort_sal_{bank_filter}")
+    else:
+        sort_by_salary = False
 
     df_f = df_raw.copy()
     if sel_bank   != "Todos": df_f = df_f[df_f["bank"]   == sel_bank]
@@ -983,7 +1049,14 @@ def render_dashboard(bank_filter: str = None, chart_scroll: bool = False):
         term = rut_search.strip().lower()
         df_f = df_f[df_f["rut"].astype(str).str.lower().str.contains(term, na=False)]
 
-    df_display = df_f[["id", "bukLeadId", "bank", "status", "rut", "source", "createdAt", "updatedAt"]].sort_values("createdAt", ascending=False)
+    df_display = df_f[["id", "bukLeadId", "bank", "status", "rut", "source", "createdAt", "updatedAt"]].copy()
+    if sort_by_salary and show_salary_range:
+        sueldos_map_sort = _fetch_sueldos_por_rut()
+        df_display = df_display.copy()
+        df_display["_avg_gross"] = df_display["rut"].map(sueldos_map_sort).fillna(-1)
+        df_display = df_display.sort_values("_avg_gross", ascending=False).drop(columns=["_avg_gross"])
+    else:
+        df_display = df_display.sort_values("createdAt", ascending=False)
 
     # Tabla HTML con badges de status
     STATUS_BADGE = {
@@ -991,16 +1064,23 @@ def render_dashboard(bank_filter: str = None, chart_scroll: bool = False):
         "rejected_by_bank": ('<span class="status-badge" style="background:#fee2e2;color:#b91c1c">❌ Rechazada</span>'),
         "created":          ('<span class="status-badge" style="background:#dbeafe;color:#1d4ed8">🔵 Creada</span>'),
     }
-    header = "<tr>" + "".join(f"<th>{c}</th>" for c in ["ID", "BukLeadId", "Banco", "Status", "RUT", "Empresa", "Creado", "Actualizado"]) + "</tr>"
+
+    sueldos_map = _fetch_sueldos_por_rut() if show_salary_range else {}
+    col_headers = ["ID", "BukLeadId", "Banco", "Status", "RUT", "Empresa", "Creado", "Rango sueldo bruto" if show_salary_range else "Actualizado"]
+    header = "<tr>" + "".join(f"<th>{c}</th>" for c in col_headers) + "</tr>"
     body_rows = []
     for _, r in df_display.head(200).iterrows():
         badge   = STATUS_BADGE.get(r["status"], f'<span class="status-badge" style="background:#f1f5f9;color:#64748b">{r["status"]}</span>')
         c_at    = r["createdAt"].strftime("%d/%m/%y %H:%M") if pd.notna(r["createdAt"]) else "—"
-        u_at    = r["updatedAt"].strftime("%d/%m/%y %H:%M") if pd.notna(r["updatedAt"]) else "—"
         source  = r["source"] if pd.notna(r.get("source")) else "—"
+        if show_salary_range:
+            avg = sueldos_map.get(r["rut"])
+            last_col = _rango_badge(avg) if avg else '<span class="status-badge" style="background:#f1f5f9;color:#94a3b8">Sin datos</span>'
+        else:
+            last_col = r["updatedAt"].strftime("%d/%m/%y %H:%M") if pd.notna(r["updatedAt"]) else "—"
         body_rows.append(
             f"<tr><td>{r['id']}</td><td>{r['bukLeadId']}</td><td>{r['bank']}</td>"
-            f"<td>{badge}</td><td>{r['rut']}</td><td>{source}</td><td>{c_at}</td><td>{u_at}</td></tr>"
+            f"<td>{badge}</td><td>{r['rut']}</td><td>{source}</td><td>{c_at}</td><td>{last_col}</td></tr>"
         )
     table_html = f"""
     <div style="background:white;border:1px solid #e2e8f0;border-radius:16px;
@@ -1018,6 +1098,123 @@ def render_dashboard(bank_filter: str = None, chart_scroll: bool = False):
         </div>
     </div>"""
     st.markdown(table_html, unsafe_allow_html=True)
+
+    if show_salary_range:
+        _sueldos = _fetch_sueldos_por_rut()
+        _rango_meta = {label: (bg, color) for _, _, label, bg, color in RANGOS_SUELDO}
+        def _get_rango(rut):
+            avg = _sueldos.get(rut)
+            if not avg:
+                return "Sin datos"
+            for lo, hi, label, _, _ in RANGOS_SUELDO:
+                if lo <= avg < hi:
+                    return label
+            return "Sin datos"
+
+        col_dist, col_env = st.columns(2)
+
+        _TH = "style='text-align:left;padding:0.4rem 1rem 0.4rem 0.6rem;font-size:0.68rem;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:#94a3b8;border-bottom:1px solid #e2e8f0'"
+        _TD = "style='padding:0.45rem 1rem 0.45rem 0.6rem;font-size:0.82rem;border-bottom:1px solid #f1f5f9'"
+        _TABLE = "style='border-collapse:collapse;font-family:Inter,sans-serif;width:100%;background:white;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.06)'"
+
+        # ── Fetch 10 días (compartido entre distribución y enviados) ──
+        _today = date.today()
+        _df_10d = fetch_data(str(_today - timedelta(days=10)), str(_today + timedelta(days=1)), dedup_clients=dedup_clients)
+        if not _df_10d.empty:
+            if bank_filter:
+                _df_10d = _df_10d[_df_10d["bank"] == bank_filter]
+            _df_10d["status"] = _df_10d["status"].replace("pre_approved", "sent_to_bank")
+        _enviados = _df_10d[_df_10d["status"] == "sent_to_bank"].sort_values("createdAt", ascending=False).head(20) if not _df_10d.empty else pd.DataFrame()
+
+        # ── Distribución por rango ──
+        with col_dist:
+            # Total: df_raw (período seleccionado, sin sub-filtros). Filtrado: df_f (con sub-filtros activos)
+            _df_dist_total = df_raw.copy()
+            _df_dist_total["_rango"] = _df_dist_total["rut"].map(_get_rango)
+            _df_dist_fil = df_f.copy()
+            _df_dist_fil["_rango"] = _df_dist_fil["rut"].map(_get_rango)
+
+            _dist_total_leads = _df_dist_total.groupby("_rango").size().rename("Total")
+            _dist_fil_leads   = _df_dist_fil.groupby("_rango").size().rename("Filtrado")
+            _dist_env         = _df_dist_total[_df_dist_total["status"] == "sent_to_bank"].groupby("_rango").size().rename("Enviados")
+
+            _conteo = pd.concat([_dist_total_leads, _dist_fil_leads, _dist_env], axis=1).fillna(0).astype({"Total": int, "Filtrado": int, "Enviados": int})
+            _conteo = _conteo.sort_values("Total", ascending=False).reset_index()
+            _conteo.columns = ["Rango", "Total", "Filtrado", "Enviados"]
+
+            _has_subfilter = (sel_bank != "Todos" or sel_status != "Todos" or bool(rut_search))
+            _period_label = f"{start_date.strftime('%-d %b')} – {end_date.strftime('%-d %b %Y')}"
+
+            _rows_html = ""
+            for _, row in _conteo.iterrows():
+                bg, color = _rango_meta.get(row["Rango"], ("#f1f5f9", "#94a3b8"))
+                badge = f'<span class="status-badge" style="background:{bg};color:{color}">{row["Rango"]}</span>'
+                _pct = round(row["Enviados"] / row["Total"] * 100) if row["Total"] > 0 else 0
+                _pct_color = "#15803d" if _pct >= 50 else "#92400e" if _pct >= 20 else "#64748b"
+                _fil_cell = f"<td {_TD} style='font-size:0.82rem;border-bottom:1px solid #f1f5f9;color:#6366f1;font-weight:600'>{int(row['Filtrado'])}</td>" if _has_subfilter else ""
+                _rows_html += f"<tr><td {_TD} style='font-size:0.82rem;border-bottom:1px solid #f1f5f9;font-weight:600'>{int(row['Total'])}</td>{_fil_cell}<td {_TD}>{badge}</td><td {_TD} style='font-size:0.82rem;font-weight:700;color:{_pct_color};border-bottom:1px solid #f1f5f9'>{_pct}%</td></tr>"
+
+            _fil_header = f"<th {_TH} style='color:#6366f1'>Filtrado</th>" if _has_subfilter else ""
+            st.markdown(f"""
+            <p style="font-size:0.65rem;font-weight:700;text-transform:uppercase;letter-spacing:0.1em;color:#94a3b8;margin:0.8rem 0 0.4rem">Distribución por rango sueldo bruto · {_period_label}</p>
+            <table {_TABLE}>
+                <thead><tr><th {_TH}>Total período</th>{_fil_header}<th {_TH}>Rango sueldo bruto</th><th {_TH}>% Enviado</th></tr></thead>
+                <tbody>{_rows_html}</tbody>
+            </table>""", unsafe_allow_html=True)
+
+        # ── Últimos enviados al banco (10 días) ──
+        with col_env:
+            if _df_10d.empty:
+                _enviados = pd.DataFrame()
+            _env_rows = ""
+            for _, r in _enviados.iterrows():
+                rango = _get_rango(r["rut"])
+                bg, color = _rango_meta.get(rango, ("#f1f5f9", "#94a3b8"))
+                rango_badge = f'<span class="status-badge" style="background:{bg};color:{color}">{rango}</span>'
+                env_badge = '<span class="status-badge" style="background:#dcfce7;color:#15803d">✅ Enviado</span>'
+                _fecha = pd.to_datetime(r["createdAt"]).strftime("%-d %b %Y") if pd.notna(r["createdAt"]) else "—"
+                _env_rows += f"<tr><td {_TD}>{r['rut']}</td><td {_TD}>{rango_badge}</td><td {_TD}>{_fecha}</td><td {_TD}>{env_badge}</td></tr>"
+            if not _env_rows:
+                _env_rows = f"<tr><td colspan='4' {_TD} style='color:#94a3b8'>Sin registros en los últimos 10 días</td></tr>"
+            st.markdown(f"""
+            <p style="font-size:0.65rem;font-weight:700;text-transform:uppercase;letter-spacing:0.1em;color:#94a3b8;margin:0.8rem 0 0.4rem">Últimos enviados al banco (10 días)</p>
+            <div style="max-height:220px;overflow-y:auto;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
+            <table {_TABLE} style="border-collapse:collapse;font-family:Inter,sans-serif;width:100%;background:white">
+                <thead style="position:sticky;top:0;z-index:1;background:white"><tr><th {_TH}>RUT</th><th {_TH}>Rango sueldo bruto</th><th {_TH}>Fecha</th><th {_TH}>Status</th></tr></thead>
+                <tbody>{_env_rows}</tbody>
+            </table>
+            </div>""", unsafe_allow_html=True)
+            if not _enviados.empty:
+                _csv_enviados = _enviados[["rut", "bank", "createdAt"]].copy()
+                _csv_enviados["rango_sueldo_bruto"] = _enviados["rut"].map(_get_rango)
+                _csv_enviados["status"] = "Enviado al banco"
+                st.markdown("""
+                <style>
+                div[data-testid="stDownloadButton"] button {
+                    background: #f8fafc;
+                    border: 1px solid #e2e8f0;
+                    color: #475569;
+                    font-size: 0.75rem;
+                    font-weight: 600;
+                    padding: 0.35rem 0.9rem;
+                    border-radius: 6px;
+                    margin-top: 0.5rem;
+                    transition: all 0.2s;
+                }
+                div[data-testid="stDownloadButton"] button:hover {
+                    background: #f1f5f9;
+                    border-color: #cbd5e1;
+                    color: #1e293b;
+                }
+                </style>""", unsafe_allow_html=True)
+                st.download_button(
+                    label="⬇️ Exportar CSV",
+                    data=_csv_enviados.to_csv(index=False).encode("utf-8"),
+                    file_name="enviados_banco_10dias.csv",
+                    mime="text/csv",
+                    key="dl_enviados",
+                )
+
     DOWNLOAD_EMAILS = {"manuelbunster@gmail.com"}  # ← agrega aquí los emails con permiso
     user_email = getattr(getattr(st, "experimental_user", None), "email", None)
     if user_email in DOWNLOAD_EMAILS:
