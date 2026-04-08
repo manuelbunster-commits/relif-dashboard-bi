@@ -296,9 +296,14 @@ section.main .block-container [data-testid="stHorizontalBlock"]:first-of-type {
     text-transform:uppercase; letter-spacing:0.07em;
     padding:0.7rem 1rem; border-bottom:1px solid #e2e8f0; text-align:left;
 }
-.detail-table td { padding:0.65rem 1rem; border-bottom:1px solid #f1f5f9; color:#0f172a; vertical-align:middle; }
+.detail-table td { padding:0.65rem 1rem; border-bottom:1px solid #f1f5f9; color:#0f172a; vertical-align:middle; transition:background 0.15s ease; }
 .detail-table tr:last-child td { border-bottom:none; }
-.detail-table tr:hover td { background:#f8fafc; }
+.detail-table tbody tr { cursor:default; }
+.detail-table tbody tr:hover td { background:#eff6ff; }
+.detail-table tbody tr:hover .copy-rut-btn { opacity:0.8 !important; }
+.copy-rut-btn:hover { opacity:1 !important; transform:scale(1.15); }
+.dist-table tbody tr { cursor:default; }
+.dist-table tbody tr:hover td { background:#eff6ff; transition:background 0.15s ease; }
 .status-badge {
     display:inline-block; padding:3px 10px; border-radius:999px;
     font-size:0.72rem; font-weight:600; line-height:1.4;
@@ -660,12 +665,39 @@ def render_dashboard(bank_filter: str = None, show_salary_range: bool = False, c
 
     subtitle_ph = st.empty()  # subtítulo con período + conteo
 
+    # ── Botones de fecha rápida ──
+    _today = date.today()
+    _presets = [
+        ("Hoy",      _today,                       _today + timedelta(days=1)),
+        ("7 días",   _today - timedelta(days=7),   _today + timedelta(days=1)),
+        ("15 días",  _today - timedelta(days=15),  _today + timedelta(days=1)),
+        ("Este mes", _today.replace(day=1),         _today + timedelta(days=1)),
+        ("30 días",  _today - timedelta(days=30),  _today + timedelta(days=1)),
+    ]
+    st.markdown("""<style>
+    div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button[kind="secondary"] {
+        font-size:0.72rem;font-weight:600;padding:0.25rem 0.6rem;border-radius:999px;
+        background:#f1f5f9;border:1px solid #e2e8f0;color:#475569;
+        transition:all 0.15s;
+    }
+    div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button[kind="secondary"]:hover {
+        background:#e2e8f0;color:#0f172a;border-color:#cbd5e1;
+    }
+    </style>""", unsafe_allow_html=True)
+    _pb = st.columns(len(_presets))
+    for i, (lbl, ps, pe) in enumerate(_presets):
+        with _pb[i]:
+            if st.button(lbl, key=f"preset_{lbl}_{bank_filter}", use_container_width=True):
+                st.session_state[f"sd_{bank_filter}"] = ps
+                st.session_state[f"ed_{bank_filter}"] = pe
+                st.rerun()
+
     # ── Filtros de fecha ──
     dc1, dc2 = st.columns(2)
     with dc1:
-        start_date = st.date_input("Desde", value=date.today())
+        start_date = st.date_input("Desde", value=_today, key=f"sd_{bank_filter}")
     with dc2:
-        end_date = st.date_input("Hasta", value=date.today() + timedelta(days=1))
+        end_date = st.date_input("Hasta", value=_today + timedelta(days=1), key=f"ed_{bank_filter}")
 
     delta_days = max((end_date - start_date).days, 1)
     # Si el rango es ≤ 7 días, comparar contra la misma ventana de la semana anterior
@@ -677,22 +709,48 @@ def render_dashboard(bank_filter: str = None, show_salary_range: bool = False, c
         prev_start = str(start_date - timedelta(days=delta_days))
         prev_end   = str(start_date)
 
-    with st.spinner("Cargando datos..."):
-        df_raw  = fetch_data(str(start_date), str(end_date), dedup_clients=dedup_clients)
-        df_prev = fetch_data(prev_start, prev_end, dedup_clients=dedup_clients)
+    try:
+        with st.spinner("Cargando datos..."):
+            df_raw  = fetch_data(str(start_date), str(end_date), dedup_clients=dedup_clients)
+            df_prev = fetch_data(prev_start, prev_end, dedup_clients=dedup_clients)
+    except Exception:
+        st.markdown("""
+        <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:12px;
+                    padding:1.2rem 1.5rem;margin:1rem 0">
+            <div style="font-size:1rem;font-weight:700;color:#dc2626;margin-bottom:0.3rem">
+                ⚠️ Error al cargar datos
+            </div>
+            <div style="font-size:0.85rem;color:#7f1d1d">
+                El servidor de datos no respondió. Puede ser un problema temporal con la API.
+            </div>
+        </div>""", unsafe_allow_html=True)
+        if st.button("🔄 Reintentar", key=f"retry_{bank_filter}"):
+            st.cache_data.clear()
+            st.rerun()
+        return
 
     now_cl = datetime.now(pytz.timezone("America/Santiago")).strftime("%d/%m/%Y %H:%M")
     st.markdown(f'<p class="last-updated">Actualizado: {now_cl}</p>', unsafe_allow_html=True)
 
     if df_raw.empty:
-        st.warning("No hay datos para el período seleccionado.")
+        st.markdown("""
+        <div style="text-align:center;padding:3rem 1rem">
+            <div style="font-size:2.5rem;margin-bottom:0.8rem">📭</div>
+            <div style="font-size:1rem;font-weight:600;color:#64748b;margin-bottom:0.3rem">Sin datos para este período</div>
+            <div style="font-size:0.85rem;color:#94a3b8">Prueba ajustando el rango de fechas</div>
+        </div>""", unsafe_allow_html=True)
         return
 
     if bank_filter:
         df_raw  = df_raw[df_raw["bank"] == bank_filter]
         df_prev = df_prev[df_prev["bank"] == bank_filter] if not df_prev.empty else df_prev
         if df_raw.empty:
-            st.warning(f"No hay datos para {bank_filter} en el período seleccionado.")
+            st.markdown(f"""
+            <div style="text-align:center;padding:3rem 1rem">
+                <div style="font-size:2.5rem;margin-bottom:0.8rem">🔍</div>
+                <div style="font-size:1rem;font-weight:600;color:#64748b;margin-bottom:0.3rem">Sin registros para {bank_filter}</div>
+                <div style="font-size:0.85rem;color:#94a3b8">No hay datos en el período seleccionado</div>
+            </div>""", unsafe_allow_html=True)
             return
 
     # ── Métricas ──
@@ -824,6 +882,78 @@ def render_dashboard(bank_filter: str = None, show_salary_range: bool = False, c
             f'<p style="font-size:0.65rem;font-weight:700;text-transform:uppercase;letter-spacing:0.1em;color:#94a3b8;margin:0 0 0.8rem">Banco</p>'
             f'{rows_html}'
             f'</div>',
+            unsafe_allow_html=True,
+        )
+
+    # ── Embudo de conversión ──
+    _section_header("Embudo de conversión", "🔻")
+    _f_col1, _f_col2 = st.columns([3, 2])
+    with _f_col1:
+        _f_total = len(df_raw)
+        _f_env   = int((df_raw["status"] == "sent_to_bank").sum())
+        _f_rec   = int((df_raw["status"] == "rejected_by_bank").sum())
+        _f_pend  = _f_total - _f_env - _f_rec
+        _b_env   = round(_f_env  / _f_total * 100) if _f_total else 0
+        _b_rec   = round(_f_rec  / _f_total * 100) if _f_total else 0
+        _b_pend  = round(_f_pend / _f_total * 100) if _f_total else 0
+
+        def _funnel_row(label, n, pct, grad, dot_color):
+            bar_w = max(pct, 2)
+            return f"""
+            <div style="margin-bottom:1.1rem">
+                <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:0.4rem">
+                    <div style="display:flex;align-items:center;gap:0.5rem">
+                        <span style="width:9px;height:9px;border-radius:50%;background:{dot_color};flex-shrink:0;display:inline-block"></span>
+                        <span style="font-size:0.82rem;font-weight:600;color:#374151">{label}</span>
+                    </div>
+                    <div style="display:flex;align-items:baseline;gap:0.5rem">
+                        <span style="font-size:0.72rem;color:#94a3b8">{pct}%</span>
+                        <span style="font-size:1.15rem;font-weight:800;color:#0f172a">{n:,}</span>
+                    </div>
+                </div>
+                <div style="background:#f1f5f9;border-radius:999px;height:7px;overflow:hidden">
+                    <div style="width:{bar_w}%;height:100%;background:{grad};border-radius:999px;transition:width 0.6s ease"></div>
+                </div>
+            </div>"""
+
+        _funnel_stages = (
+            _funnel_row("Leads creados",      _f_total, 100,    "linear-gradient(90deg,#6366f1,#3b82f6)", "#6366f1") +
+            '<div style="margin-left:0.85rem;margin-bottom:0.7rem;margin-top:-0.4rem;'
+            'font-size:0.68rem;color:#94a3b8;letter-spacing:0.04em">▾ &nbsp;de los cuales…</div>' +
+            _funnel_row("Enviados al banco",   _f_env,   _b_env, "linear-gradient(90deg,#22c55e,#16a34a)", "#22c55e") +
+            _funnel_row("Rechazados por banco",_f_rec,   _b_rec, "linear-gradient(90deg,#f87171,#ef4444)", "#ef4444") +
+            _funnel_row("Pendientes",          _f_pend,  _b_pend,"linear-gradient(90deg,#94a3b8,#64748b)", "#94a3b8")
+        )
+        st.markdown(
+            '<div style="background:white;border:1px solid #e2e8f0;border-radius:16px;padding:1.4rem 1.6rem;'
+            'box-shadow:0 1px 3px rgba(0,0,0,0.04),0 4px 20px rgba(0,0,0,0.05)">'
+            + _funnel_stages +
+            '</div>',
+            unsafe_allow_html=True,
+        )
+    with _f_col2:
+        _tasa_env  = round(_f_env / _f_total * 100) if _f_total else 0
+        _tasa_rec  = round(_f_rec / _f_total * 100) if _f_total else 0
+        _tasa_pend = round(_f_pend / _f_total * 100) if _f_total else 0
+        def _stat_row(label, pct, color):
+            return (
+                f'<div style="display:flex;justify-content:space-between;align-items:center">'
+                f'<span style="font-size:0.8rem;color:#64748b">{label}</span>'
+                f'<span style="font-size:1rem;font-weight:700;color:{color}">{pct}%</span>'
+                f'</div>'
+            )
+        _summary_rows = (
+            _stat_row("Enviados al banco", _tasa_env, "#22c55e") +
+            _stat_row("Rechazados", _tasa_rec, "#ef4444") +
+            _stat_row("Pendientes", _tasa_pend, "#64748b")
+        )
+        st.markdown(
+            '<div style="background:white;border:1px solid #e2e8f0;border-radius:14px;padding:1.2rem 1.4rem;'
+            'box-shadow:0 1px 3px rgba(0,0,0,0.05)">'
+            '<p style="font-size:0.65rem;font-weight:700;text-transform:uppercase;letter-spacing:0.1em;color:#94a3b8;margin:0 0 1rem">Resumen del embudo</p>'
+            '<div style="display:flex;flex-direction:column;gap:0.75rem">'
+            + _summary_rows +
+            '</div></div>',
             unsafe_allow_html=True,
         )
 
@@ -1003,24 +1133,27 @@ def render_dashboard(bank_filter: str = None, show_salary_range: bool = False, c
     components.html("""
 <script>
 (function () {
+    var _runId = Date.now();
     function run() {
         window.parent.document.querySelectorAll('[data-counter]').forEach(function (el) {
-            if (el.dataset.animated) return;
-            el.dataset.animated = '1';
+            if (el.dataset.runId === String(_runId)) return;
+            el.dataset.runId = String(_runId);
             var target = parseFloat(el.getAttribute('data-counter'));
             var suffix = el.getAttribute('data-suffix') || '';
             var start  = null;
+            var duration = 800;
             function step(ts) {
                 if (!start) start = ts;
-                var t    = Math.min((ts - start) / 900, 1);
+                var t    = Math.min((ts - start) / duration, 1);
                 var ease = 1 - Math.pow(1 - t, 3);
                 el.textContent = Math.round(target * ease).toLocaleString('es-CL') + suffix;
                 if (t < 1) requestAnimationFrame(step);
+                else el.textContent = target.toLocaleString('es-CL') + suffix;
             }
             requestAnimationFrame(step);
         });
     }
-    setTimeout(run, 400);
+    setTimeout(run, 300);
 })();
 </script>
 """, height=0)
@@ -1065,14 +1198,36 @@ def render_dashboard(bank_filter: str = None, show_salary_range: bool = False, c
         "created":          ('<span class="status-badge" style="background:#dbeafe;color:#1d4ed8">🔵 Creada</span>'),
     }
 
+    # ── Paginación ──
+    _PAGE_SIZE  = 50
+    _page_key   = f"pg_{bank_filter}"
+    _sig_key    = f"pg_sig_{bank_filter}"
+    _filter_sig = f"{sel_bank}|{sel_status}|{rut_search}"
+    if st.session_state.get(_sig_key) != _filter_sig:
+        st.session_state[_page_key] = 0
+        st.session_state[_sig_key]  = _filter_sig
+    _total_rows  = len(df_display)
+    _total_pages = max(1, (_total_rows + _PAGE_SIZE - 1) // _PAGE_SIZE)
+    _page        = min(st.session_state.get(_page_key, 0), _total_pages - 1)
+    _start       = _page * _PAGE_SIZE
+    _end         = _start + _PAGE_SIZE
+    _page_df     = df_display.iloc[_start:_end]
+
     sueldos_map = _fetch_sueldos_por_rut() if show_salary_range else {}
     col_headers = ["ID", "BukLeadId", "Banco", "Status", "RUT", "Empresa", "Creado", "Rango sueldo bruto" if show_salary_range else "Actualizado"]
     header = "<tr>" + "".join(f"<th>{c}</th>" for c in col_headers) + "</tr>"
     body_rows = []
-    for _, r in df_display.head(200).iterrows():
+    for _, r in _page_df.iterrows():
         badge   = STATUS_BADGE.get(r["status"], f'<span class="status-badge" style="background:#f1f5f9;color:#64748b">{r["status"]}</span>')
         c_at    = r["createdAt"].strftime("%d/%m/%y %H:%M") if pd.notna(r["createdAt"]) else "—"
         source  = r["source"] if pd.notna(r.get("source")) else "—"
+        _rut    = str(r["rut"]).replace("'", "&#39;").replace('"', "&quot;")
+        _rut_cell = (
+            f"{r['rut']}"
+            f'<button class="copy-rut-btn" data-rut="{_rut}" title="Copiar RUT"'
+            f' style="background:none;border:none;cursor:pointer;padding:0;margin-left:5px;'
+            f'opacity:0.4;font-size:0.78rem;vertical-align:middle;line-height:1">📋</button>'
+        )
         if show_salary_range:
             avg = sueldos_map.get(r["rut"])
             last_col = _rango_badge(avg) if avg else '<span class="status-badge" style="background:#f1f5f9;color:#94a3b8">Sin datos</span>'
@@ -1080,7 +1235,7 @@ def render_dashboard(bank_filter: str = None, show_salary_range: bool = False, c
             last_col = r["updatedAt"].strftime("%d/%m/%y %H:%M") if pd.notna(r["updatedAt"]) else "—"
         body_rows.append(
             f"<tr><td>{r['id']}</td><td>{r['bukLeadId']}</td><td>{r['bank']}</td>"
-            f"<td>{badge}</td><td>{r['rut']}</td><td>{source}</td><td>{c_at}</td><td>{last_col}</td></tr>"
+            f"<td>{badge}</td><td>{_rut_cell}</td><td>{source}</td><td>{c_at}</td><td>{last_col}</td></tr>"
         )
     table_html = f"""
     <div style="background:white;border:1px solid #e2e8f0;border-radius:16px;
@@ -1094,10 +1249,28 @@ def render_dashboard(bank_filter: str = None, show_salary_range: bool = False, c
         </div>
         <div style="padding:0.6rem 1rem;background:#f8fafc;border-top:1px solid #e2e8f0;
                     font-size:0.7rem;color:#94a3b8">
-            Mostrando {min(200, len(df_display))} de {len(df_display)} registros
+            Mostrando {len(_page_df)} de {_total_rows} registros · Página {_page + 1} de {_total_pages}
         </div>
     </div>"""
     st.markdown(table_html, unsafe_allow_html=True)
+
+    # ── Controles de paginación ──
+    if _total_pages > 1:
+        _pg_cols = st.columns([1, 2, 1])
+        with _pg_cols[0]:
+            if st.button("← Anterior", key=f"pg_prev_{bank_filter}", disabled=_page == 0, use_container_width=True):
+                st.session_state[_page_key] = _page - 1
+                st.rerun()
+        with _pg_cols[1]:
+            st.markdown(
+                f"<p style='text-align:center;font-size:0.8rem;color:#64748b;margin:0.4rem 0'>"
+                f"Página <b style='color:#0f172a'>{_page + 1}</b> de {_total_pages}</p>",
+                unsafe_allow_html=True,
+            )
+        with _pg_cols[2]:
+            if st.button("Siguiente →", key=f"pg_next_{bank_filter}", disabled=_page >= _total_pages - 1, use_container_width=True):
+                st.session_state[_page_key] = _page + 1
+                st.rerun()
 
     if show_salary_range:
         _sueldos = _fetch_sueldos_por_rut()
@@ -1115,7 +1288,7 @@ def render_dashboard(bank_filter: str = None, show_salary_range: bool = False, c
 
         _TH = "style='text-align:left;padding:0.4rem 1rem 0.4rem 0.6rem;font-size:0.68rem;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:#94a3b8;border-bottom:1px solid #e2e8f0'"
         _TD = "style='padding:0.45rem 1rem 0.45rem 0.6rem;font-size:0.82rem;border-bottom:1px solid #f1f5f9'"
-        _TABLE = "style='border-collapse:collapse;font-family:Inter,sans-serif;width:100%;background:white;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.06)'"
+        _TABLE = "class='dist-table' style='border-collapse:collapse;font-family:Inter,sans-serif;width:100%;background:white;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.06)'"
 
         # ── Fetch 10 días (compartido entre distribución y enviados) ──
         _today = date.today()
@@ -1218,18 +1391,101 @@ def render_dashboard(bank_filter: str = None, show_salary_range: bool = False, c
     DOWNLOAD_EMAILS = {"manuelbunster@gmail.com"}  # ← agrega aquí los emails con permiso
     user_email = getattr(getattr(st, "experimental_user", None), "email", None)
     if user_email in DOWNLOAD_EMAILS:
-        st.download_button(
-            label="⬇️ Descargar CSV",
-            data=df_display.to_csv(index=False).encode("utf-8"),
-            file_name=f"detalle_registros_{bank_filter or 'consolidado'}.csv",
-            mime="text/csv",
-        )
+        import io
+        _dl1, _dl2 = st.columns(2)
+        with _dl1:
+            st.download_button(
+                label="⬇️ Descargar CSV",
+                data=df_display.to_csv(index=False).encode("utf-8"),
+                file_name=f"detalle_registros_{bank_filter or 'consolidado'}.csv",
+                mime="text/csv",
+                key="dl_csv_main",
+            )
+        with _dl2:
+            _excel_buf = io.BytesIO()
+            with pd.ExcelWriter(_excel_buf, engine="openpyxl") as _xw:
+                df_display.to_excel(_xw, index=False, sheet_name="Registros")
+            st.download_button(
+                label="⬇️ Descargar Excel",
+                data=_excel_buf.getvalue(),
+                file_name=f"detalle_registros_{bank_filter or 'consolidado'}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="dl_xlsx_main",
+            )
 
     # ── Footer ──
-    st.markdown("""
+    st.markdown(f"""
     <div style="margin-top:3rem;padding:1.2rem 0;border-top:1px solid #e2e8f0;
                 display:flex;align-items:center;justify-content:space-between;
                 flex-wrap:wrap;gap:0.5rem">
         <span style="font-size:0.72rem;font-weight:700;color:#94a3b8;letter-spacing:0.05em">RELIF</span>
-        <span style="font-size:0.7rem;color:#cbd5e1">Dashboard de operaciones bancarias</span>
+        <span style="font-size:0.7rem;color:#cbd5e1">
+            Dashboard de operaciones bancarias &nbsp;·&nbsp;
+            <b style="color:#94a3b8">{total_curr}</b> registros &nbsp;·&nbsp;
+            Actualizado {now_cl}
+        </span>
     </div>""", unsafe_allow_html=True)
+
+    # ── Toast + Copy-RUT + Download hooks ──
+    components.html("""
+<script>
+(function() {
+    var pd = window.parent.document;
+
+    // Toast container
+    if (!pd.getElementById('relif-toast-cnt')) {
+        var tc = pd.createElement('div');
+        tc.id = 'relif-toast-cnt';
+        tc.style.cssText = 'position:fixed;bottom:1.6rem;right:1.6rem;z-index:9999;'
+                         + 'pointer-events:none;display:flex;flex-direction:column;'
+                         + 'align-items:flex-end;gap:0.35rem';
+        pd.body.appendChild(tc);
+    }
+
+    function showToast(msg) {
+        var tc = pd.getElementById('relif-toast-cnt');
+        if (!tc) return;
+        var t = pd.createElement('div');
+        t.textContent = msg;
+        t.style.cssText = 'background:#1e293b;color:#f8fafc;padding:0.5rem 1rem;border-radius:8px;'
+                        + 'font-size:0.82rem;font-family:Inter,sans-serif;font-weight:500;'
+                        + 'opacity:0;transition:opacity 0.2s ease;pointer-events:none;'
+                        + 'box-shadow:0 4px 14px rgba(0,0,0,0.28);white-space:nowrap';
+        tc.appendChild(t);
+        requestAnimationFrame(function() { t.style.opacity = '1'; });
+        setTimeout(function() {
+            t.style.opacity = '0';
+            setTimeout(function() { t.parentNode && t.parentNode.removeChild(t); }, 250);
+        }, 2400);
+    }
+
+    // Copy-RUT via event delegation (one listener on document)
+    if (!pd._reliefCopyBound) {
+        pd._reliefCopyBound = true;
+        pd.addEventListener('click', function(e) {
+            var btn = e.target.closest ? e.target.closest('.copy-rut-btn') : null;
+            if (!btn) return;
+            var rut = btn.getAttribute('data-rut');
+            var clipApi = (window.parent.navigator.clipboard || navigator.clipboard);
+            clipApi.writeText(rut).then(function() {
+                var orig = btn.textContent;
+                btn.textContent = '✅';
+                setTimeout(function() { btn.textContent = orig; }, 1200);
+                showToast('📋 RUT copiado: ' + rut);
+            }).catch(function() { showToast('No se pudo copiar el RUT'); });
+        });
+    }
+
+    // Hook download buttons
+    function hookDL() {
+        pd.querySelectorAll('[data-testid="stDownloadButton"] a, [data-testid="stDownloadButton"] button').forEach(function(b) {
+            if (b.dataset.toastHooked) return;
+            b.dataset.toastHooked = '1';
+            b.addEventListener('click', function() { showToast('⬇️ Descargando archivo…'); });
+        });
+    }
+    hookDL();
+    setTimeout(hookDL, 600);
+})();
+</script>
+""", height=0)
